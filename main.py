@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision.transforms as transforms
 from PIL import Image, UnidentifiedImageError
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm
 
 # --- ロギング設定 ---
@@ -38,6 +38,10 @@ class Config:
     max_writers: int = 100
     max_imgs_per_writer: int = 100
     data_root: str = "./data/nist/extracted"
+
+    # 高速化設定
+    num_workers: int = 4
+    pin_memory: bool = True  # デフォルト値（CLIで上書きされる）
 
     # システム設定
     device: str = field(
@@ -87,6 +91,31 @@ class Config:
             "--data-root", type=str, default=defaults.data_root, help="Data root path"
         )
         parser.add_argument(
+            "--num-workers",
+            type=int,
+            default=defaults.num_workers,
+            help="Number of workers",
+        )
+
+        # --- pin_memory の自動判定ロジック ---
+        # 1. 相互排他グループを作成（オンとオフを同時に指定できないようにする）
+        group = parser.add_mutually_exclusive_group()
+
+        # 2. default=None にして、「指定なし」の状態を作れるようにする
+        group.add_argument(
+            "--pin-memory",
+            action="store_true",
+            default=None,
+            help="Force enable pin_memory",
+        )
+        group.add_argument(
+            "--no-pin-memory",
+            action="store_false",
+            dest="pin_memory",
+            help="Force disable pin_memory",
+        )
+
+        parser.add_argument(
             "--device", type=str, default=defaults.device, help="Device (cpu/cuda)"
         )
         parser.add_argument(
@@ -97,6 +126,12 @@ class Config:
         )
 
         args = parser.parse_args()
+
+        # 3. 指定がなければ device に応じて自動決定
+        if args.pin_memory is None:
+            # device名に "cuda" が含まれていれば True、そうでなければ False
+            args.pin_memory = "cuda" in args.device
+
         return cls(**vars(args))
 
 
@@ -291,13 +326,44 @@ class SimpleCNN(nn.Module):
 # --- Client 定義 ---
 class Client:
     def __init__(self, dataset: NistWriterDataset, config: Config):
-        self.dataset = dataset
         self.cfg = config
         self.device = torch.device(config.device)
-        self.dataloader = DataLoader(
-            dataset, batch_size=min(config.batch_size, len(dataset)), shuffle=True
-        )
         self.criterion = nn.CrossEntropyLoss()
+        self.writer_id = dataset.writer_id
+
+        # --- データの分割 (80% Train, 20% Test) ---
+        total_len = len(dataset)
+        train_len = int(total_len * 0.8)
+        test_len = total_len - train_len
+
+        if train_len == 0:
+            train_len = total_len
+            test_len = 0
+
+        # seed固定
+        self.train_dataset, self.test_dataset = random_split(
+            dataset, [train_len, test_len], generator=torch.Generator().manual_seed(42)
+        )
+
+        # DataLoaderの作成
+        self.train_loader = DataLoader(
+            self.train_dataset,
+            batch_size=min(config.batch_size, len(self.train_dataset)),
+            shuffle=True,
+            num_workers=config.num_workers,
+            pin_memory=config.pin_memory if torch.cuda.is_available() else False,
+        )
+
+        if test_len > 0:
+            self.test_loader = DataLoader(
+                self.test_dataset,
+                batch_size=config.batch_size,
+                shuffle=False,
+                num_workers=config.num_workers,
+                pin_memory=config.pin_memory if torch.cuda.is_available() else False,
+            )
+        else:
+            self.test_loader = None
 
     def participate(
         self, global_models: List[nn.Module]
@@ -317,7 +383,7 @@ class Client:
         batch_count = 0
 
         for _ in range(self.cfg.local_epochs):
-            for x, y in self.dataloader:
+            for x, y in self.train_loader:
                 x, y = x.to(self.device), y.to(self.device)
                 optimizer.zero_grad()
                 out = model(x)
@@ -334,11 +400,10 @@ class Client:
     def _select_best_model(
         self, global_models: List[nn.Module]
     ) -> Tuple[int, nn.Module]:
-        # チェック用バッチの取得
+        # 学習データの最初のバッチを使って判断する
         try:
-            x_check, y_check = next(iter(self.dataloader))
+            x_check, y_check = next(iter(self.train_loader))
         except StopIteration:
-            # データが無い場合のフォールバック（通常ありえないが念のため）
             return 0, copy.deepcopy(global_models[0])
 
         x_check, y_check = x_check.to(self.device), y_check.to(self.device)
@@ -403,9 +468,11 @@ class Server:
 
         # クライアントごとにテスト（各クライアントは最適なモデルを選択して評価）
         for client in clients:
-            test_loader = DataLoader(
-                client.dataset, batch_size=self.cfg.batch_size, shuffle=False
-            )
+            # 修正: clientが持っている test_loader を使用
+            if client.test_loader is None:
+                continue
+
+            test_loader = client.test_loader
 
             # クライアントに最適なモデルを選択（本来はValidation setを使うべきだが、簡易的に1バッチで選択）
             # ここでは Client クラスのロジックを再利用せず、サーバー側で検証ロジックを持つ形にする
@@ -542,7 +609,7 @@ def main():
 
             round_updates.append((center_idx, weights, loss))
             round_losses.append(loss)
-            current_allocations[client.dataset.writer_id] = center_idx
+            current_allocations[client.writer_id] = center_idx
 
         # 集約
         server.aggregate(round_updates)
