@@ -2,6 +2,7 @@ import argparse
 import copy
 import json
 import logging
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -535,12 +536,14 @@ class ExperimentLogger:
         val_loss: float,
         accuracy: float,
         center_counts: Dict[int, int],
+        elapsed_time: float,
     ):
         record = {
             "Round": round_num,
             "Train Loss": train_loss,
             "Val Loss": val_loss,
             "Accuracy": accuracy,
+            "Time": elapsed_time,
         }
         for k, v in center_counts.items():
             record[f"Center_{k}_Clients"] = v
@@ -597,6 +600,8 @@ def main():
 
     # 4. 学習ループ
     for r in range(config.rounds):
+        start_time = time.time()
+
         round_updates = []
         round_losses = []
 
@@ -623,13 +628,18 @@ def main():
         for idx, _, _ in round_updates:
             center_counts[idx] += 1
 
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+
         counts_str = ", ".join([f"C{k}: {v}" for k, v in center_counts.items()])
         logger.info(
-            f"Round {r + 1:02d} | Train: {avg_train_loss:.4f} | Val: {val_loss:.4f} | Acc: {acc:.2f}% | [{counts_str}]"
+            f"Round {r + 1:02d} | Time: {elapsed_time:.2f}s | Train: {avg_train_loss:.4f} | Val: {val_loss:.4f} | Acc: {acc:.2f}% | [{counts_str}]"
         )
 
         # ログ保存
-        exp_logger.save_round_log(r + 1, avg_train_loss, val_loss, acc, center_counts)
+        exp_logger.save_round_log(
+            r + 1, avg_train_loss, val_loss, acc, center_counts, elapsed_time
+        )
         exp_logger.save_allocations([current_allocations])
 
     logger.info("Training Finished.")
