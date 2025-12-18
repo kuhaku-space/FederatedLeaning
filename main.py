@@ -69,7 +69,7 @@ class Config:
             help="Local epochs",
         )
         parser.add_argument(
-            "--batch_size", type=int, default=defaults.batch_size, help="Batch size"
+            "--batch-size", type=int, default=defaults.batch_size, help="Batch size"
         )
         parser.add_argument(
             "--lr", type=float, default=defaults.lr, help="Learning rate"
@@ -84,7 +84,7 @@ class Config:
             help="Max images per writer",
         )
         parser.add_argument(
-            "--data_root", type=str, default=defaults.data_root, help="Data root path"
+            "--data-root", type=str, default=defaults.data_root, help="Data root path"
         )
         parser.add_argument(
             "--device", type=str, default=defaults.device, help="Device (cpu/cuda)"
