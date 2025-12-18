@@ -210,7 +210,9 @@ class NistDataManager:
         hex_to_label = self._generate_hex_label_map()
 
         # .mit ファイルの解析
-        for hex_code, label in tqdm(hex_to_label.items(), desc="Parsing classes"):
+        for hex_code, label in tqdm(
+            hex_to_label.items(), desc="Parsing classes", ncols=80
+        ):
             # ディレクトリ検索（大文字小文字対応）
             target_dir = class_dir / hex_code
             if not target_dir.exists():
@@ -609,7 +611,9 @@ def main():
         current_allocations = {"Round": r + 1}
 
         # クライアント学習
-        for client in tqdm(clients, desc=f"Round {r + 1}/{config.rounds}", leave=False):
+        for client in tqdm(
+            clients, desc=f"Round {r + 1}/{config.rounds}", leave=False, ncols=80
+        ):
             center_idx, weights, loss = client.participate(server.models)
 
             round_updates.append((center_idx, weights, loss))
