@@ -310,15 +310,29 @@ class NistDataManager:
 class SimpleCNN(nn.Module):
     def __init__(self, num_classes: int):
         super(SimpleCNN, self).__init__()
+
         self.features = nn.Sequential(
-            nn.Conv2d(1, 32, 3, 1),
+            # Conv1: filters=32, kernel_size=[5, 5], padding="same"
+            nn.Conv2d(in_channels=1, out_channels=32, kernel_size=5, padding=2),
             nn.ReLU(),
-            nn.Conv2d(32, 64, 3, 1),
+            # Pool1: pool_size=[2, 2], strides=2
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # Conv2: filters=64, kernel_size=[5, 5], padding="same"
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=5, padding=2),
             nn.ReLU(),
-            nn.MaxPool2d(2),
+            # Pool2: pool_size=[2, 2], strides=2
+            nn.MaxPool2d(kernel_size=2, stride=2),
         )
+
+        # Dense層
+        # 入力次元: 7 * 7 * 64 = 3136
         self.classifier = nn.Sequential(
-            nn.Flatten(), nn.Linear(9216, 128), nn.ReLU(), nn.Linear(128, num_classes)
+            nn.Flatten(),
+            # Dense1: units=248, activation=relu
+            nn.Linear(3136, 248),
+            nn.ReLU(),
+            # Logits: units=num_classes
+            nn.Linear(248, num_classes),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
