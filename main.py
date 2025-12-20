@@ -581,6 +581,12 @@ def main():
     config = Config.from_args()
     logger.info(f"Using device: {config.device}")
 
+    if "cuda" in config.device:
+        # GPUの場合: デバイス名を表示
+        gpu_name = torch.cuda.get_device_name(0)
+        logger.info(f"GPU Name: {gpu_name}")
+        logger.info(f"CUDA Version: {torch.version.cuda}")
+
     # 1. ログ管理初期化
     exp_logger = ExperimentLogger(config)
 
