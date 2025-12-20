@@ -96,17 +96,16 @@ def main():
     tab1, tab2 = st.tabs(["Accuracy & Loss", "Time per Round"])
 
     with tab1:
-        # 複数の線を1つのグラフに描画するのは見づらいので、2カラムに分ける
         c1, c2 = st.columns(2)
 
         with c1:
             fig_acc = px.line(
                 log_df, x="Round", y="Accuracy", title="Global Accuracy", markers=True
             )
-            st.plotly_chart(fig_acc, use_container_width=True)
+            # 修正: use_container_width=True -> width="stretch"
+            st.plotly_chart(fig_acc, width="stretch")
 
         with c2:
-            # LossをmeltしてTrain/Valを同じグラフに
             loss_cols = ["Train Loss", "Val Loss"]
             loss_df = log_df.melt(
                 id_vars=["Round"],
@@ -122,14 +121,16 @@ def main():
                 title="Loss Evolution",
                 markers=True,
             )
-            st.plotly_chart(fig_loss, use_container_width=True)
+            # 修正: use_container_width=True -> width="stretch"
+            st.plotly_chart(fig_loss, width="stretch")
 
     with tab2:
         if "Time" in log_df.columns:
             fig_time = px.bar(
                 log_df, x="Round", y="Time", title="Execution Time per Round (seconds)"
             )
-            st.plotly_chart(fig_time, use_container_width=True)
+            # 修正: use_container_width=True -> width="stretch"
+            st.plotly_chart(fig_time, width="stretch")
         else:
             st.info("Time data not available.")
 
@@ -143,7 +144,6 @@ def main():
             var_name="Center",
             value_name="Count",
         )
-        # 見やすいように名前を短縮 (Center_0_Clients -> C0)
         cluster_df["Center"] = cluster_df["Center"].apply(
             lambda x: x.replace("Center_", "C").replace("_Clients", "")
         )
@@ -155,7 +155,8 @@ def main():
             color="Center",
             title="Client Distribution per Center",
         )
-        st.plotly_chart(fig_cluster, use_container_width=True)
+        # 修正: use_container_width=True -> width="stretch"
+        st.plotly_chart(fig_cluster, width="stretch")
 
     # 3. クライアント所属ヒートマップ (改良版)
     st.subheader("🗺️ Client Allocation Heatmap")
@@ -166,27 +167,20 @@ def main():
         色が安定して帯状になっている部分は、所属が固定化していることを示します。
         """)
 
-        # --- データ整形 ---
-        # 1. 転置して (Index=Writer, Columns=Round) の形にする
-        # ラウンド列を削除して転置
+        # データ整形
         heatmap_data = alloc_df.set_index("Round").T
 
-        # 2. ソート機能: 最終ラウンドの所属センターID順に並び替え
-        # これにより、同じセンターの人が固まって表示される
+        # ソート機能
         last_round = heatmap_data.columns[-1]
         heatmap_data = heatmap_data.sort_values(by=[last_round], ascending=True)
 
-        # 3. 表示範囲のフィルタリング (ページネーション)
+        # ページネーション
         total_writers = len(heatmap_data)
-
-        # 表示数が多い場合はスライダーを表示
         if total_writers > 20:
             step = 20
             st.caption(
                 f"Total Writers: {total_writers}. 表示範囲を選択してください（動作を軽くするため分割表示します）。"
             )
-
-            # スライダーで表示範囲（start_idx, end_idx）を決める
             start_idx = st.slider(
                 "Display Range (Start Index)",
                 min_value=0,
@@ -194,42 +188,35 @@ def main():
                 value=0,
                 step=step,
             )
-            end_idx = min(start_idx + step * 2, total_writers)  # 一度に最大40-50人表示
-
-            # データをスライス
+            end_idx = min(start_idx + step * 2, total_writers)
             heatmap_subset = heatmap_data.iloc[start_idx:end_idx]
         else:
             heatmap_subset = heatmap_data
 
-        # --- 描画 (px.imshowを使用) ---
-        # センターIDは 0, 1, 2... なので、不連続な色使いにする
+        # 描画
         fig_heat = px.imshow(
             heatmap_subset,
             labels=dict(x="Round", y="Writer ID", color="Center ID"),
-            aspect="auto",  # 縦横比を自動調整
-            color_continuous_scale="Viridis",  # 視認性の良いカラースケール
-            origin="lower",  # 0番目のユーザーを下にするか上にするか
+            aspect="auto",
+            color_continuous_scale="Viridis",
+            origin="lower",
         )
 
-        # CenterIDは整数（カテゴリ）なので、カラーバーを離散的に見せる工夫
-        fig_heat.update_traces(
-            xgap=1,  # タイル間の隙間（横）
-            ygap=1,  # タイル間の隙間（縦）
-        )
+        fig_heat.update_traces(xgap=1, ygap=1)
 
-        # レイアウト調整
         fig_heat.update_layout(
-            height=600,  # 高さを固定
+            height=600,
             xaxis_title="Round",
             yaxis_title="Writer ID (Sorted by Final Center)",
             coloraxis_colorbar=dict(
                 title="Center ID",
-                tickvals=[0, 1, 2, 3, 4],  # センター数に応じて適宜表示
+                tickvals=[0, 1, 2, 3, 4],
                 ticktext=["C0", "C1", "C2", "C3", "C4"],
             ),
         )
 
-        st.plotly_chart(fig_heat, use_container_width=True)
+        # 修正: use_container_width=True -> width="stretch"
+        st.plotly_chart(fig_heat, width="stretch")
 
     else:
         st.info("No allocation data found (client_allocation.csv).")
