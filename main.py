@@ -467,7 +467,7 @@ class Server:
         self.cfg = config
         self.device = torch.device(config.device)
         self.models = [
-            SimpleCNN(config.num_classes).to(self.device)
+            torch.compile(SimpleCNN(config.num_classes).to(self.device))
             for _ in range(config.num_centers)
         ]
         self.criterion = nn.CrossEntropyLoss()
