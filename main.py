@@ -144,32 +144,50 @@ class NistWriterDataset(Dataset):
         images: List[str],
         labels: List[int],
         transform: Optional[transforms.Compose] = None,
+        device: str = "cpu",
     ):
         self.writer_id = writer_id
-        self.images = images
-        self.labels = labels
-        self.transform = transform
+
+        loaded_images = []
+        loaded_labels = []
+
+        for path, label in zip(images, labels):
+            try:
+                with Image.open(path) as img:
+                    img = img.convert("L")
+                    if transform:
+                        img = transform(img)
+
+                    if not isinstance(img, torch.Tensor):
+                        img = transforms.ToTensor()(img)
+
+                    loaded_images.append(img)
+                    loaded_labels.append(label)
+
+            except (UnidentifiedImageError, OSError) as e:
+                logger.warning(f"Error loading image {path}: {e}")
+                continue
+
+        if not loaded_images:
+            logger.warning(f"Writer {writer_id} has no valid images.")
+            # 型チェッカーのために明示的に型注釈を行う
+            self.data: torch.Tensor = torch.empty(0)
+            self.targets: torch.Tensor = torch.empty(0)
+            return
+
+        # データをGPUメモリへ転送
+        # ここで明示的に型注釈 (: torch.Tensor) をつけることで Unknown を回避
+        self.data: torch.Tensor = torch.stack(loaded_images).to(device)
+        self.targets: torch.Tensor = torch.tensor(loaded_labels, dtype=torch.long).to(
+            device
+        )
 
     def __len__(self) -> int:
-        return len(self.images)
+        return len(self.data)
 
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, int]:
-        path = self.images[index]
-        label = self.labels[index]
-        try:
-            with Image.open(path) as img:
-                img = img.convert("L")
-                if self.transform:
-                    img = self.transform(img)
-
-            if not isinstance(img, torch.Tensor):
-                img = transforms.ToTensor()(img)
-            return img, label
-        except (UnidentifiedImageError, OSError) as e:
-            # 破損画像の場合は警告を出してゼロ埋めデータを返す（学習を止めないため）
-            # 本来はDataset作成時に除外するのがベスト
-            logger.warning(f"Error loading image {path}: {e}")
-            return torch.zeros((1, 28, 28)), label
+    # 修正箇所: 戻り値の型ヒントを Tensor, Tensor に変更
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.data[index], self.targets[index]
 
 
 # --- データ管理クラス ---
@@ -296,7 +314,9 @@ class NistDataManager:
 
             # 最低枚数チェック
             if len(images) > 10:
-                ds = NistWriterDataset(w_id, images, labels, self.transform)
+                ds = NistWriterDataset(
+                    w_id, images, labels, self.transform, self.cfg.device
+                )
                 writers_datasets.append(ds)
                 count += 1
                 if count >= self.cfg.max_writers:
