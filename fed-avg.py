@@ -305,8 +305,6 @@ def main() -> None:
 
     print(net_glob)
 
-    # グローバルモデルの重みをコピー
-    w_glob = net_glob.state_dict()
     # ローカル学習用のモデルを1つ作成して使い回す
     net_local = copy.deepcopy(net_glob)
 
@@ -314,6 +312,9 @@ def main() -> None:
     # castを使用して型チェッカーのエラーを回避し、学習用・評価用両方を最適化する
     net_glob = cast(nn.Module, torch.compile(net_glob))
     net_local = cast(nn.Module, torch.compile(net_local))
+
+    # グローバルモデルの重みをコピー (コンパイル後に行うことでキーを一致させる)
+    w_glob = net_glob.state_dict()
 
     # 学習履歴
     loss_train: List[float] = []
