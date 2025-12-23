@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, TensorDataset
 from torchvision import datasets, transforms
 
 # ==========================================
@@ -73,6 +73,14 @@ def get_mnist() -> Tuple[datasets.MNIST, datasets.MNIST]:
         "./data/mnist/", train=False, download=True, transform=trans
     )
     return dataset_train, dataset_test
+
+
+def dataset_to_device(dataset: datasets.MNIST, device: torch.device) -> TensorDataset:
+    """データセット全体をGPUメモリに転送する"""
+    # DataLoaderを使って変換済みの全データを取得する
+    loader = DataLoader(dataset, batch_size=len(dataset), shuffle=False)
+    data, targets = next(iter(loader))
+    return TensorDataset(data.to(device), targets.to(device))
 
 
 def mnist_iid(dataset: datasets.MNIST, num_users: int) -> Dict[int, Set[int]]:
@@ -158,7 +166,7 @@ class LocalUpdate(object):
     def __init__(
         self,
         args: argparse.Namespace,
-        dataset: datasets.MNIST,
+        dataset: Union[datasets.MNIST, TensorDataset],
         idxs: Union[Set[int], np.ndarray],
     ) -> None:
         self.args = args
@@ -211,7 +219,9 @@ def FedAvg(w: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
 
 
 def test_img(
-    net_g: nn.Module, datatest: datasets.MNIST, args: argparse.Namespace
+    net_g: nn.Module,
+    datatest: Union[datasets.MNIST, TensorDataset],
+    args: argparse.Namespace,
 ) -> Tuple[float, float]:
     """グローバルモデルの評価"""
     net_g.eval()
@@ -255,6 +265,11 @@ def main() -> None:
         dict_users = mnist_iid(dataset_train, args.num_users)
     else:
         dict_users = mnist_noniid(dataset_train, args.num_users)
+
+    # データセットをGPUへ転送
+    if args.gpu != -1:
+        dataset_train = dataset_to_device(dataset_train, args.device)
+        dataset_test = dataset_to_device(dataset_test, args.device)
 
     # モデルの初期化
     net_glob: nn.Module
