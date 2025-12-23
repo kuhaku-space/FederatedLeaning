@@ -362,56 +362,69 @@ class NistDataManager:
     def _create_dirichlet_datasets(self, writers_data: Dict) -> List[NistWriterDataset]:
         """
         Dirichlet分布を用いたNon-IID分割。
-        全ライターのデータを一度プールし、クラスごとにDirichlet分布に従って各クライアントへ分配します。
+        各クライアントには特定の1人のライターのデータのみを割り当て、
+        その中でのクラス分布をDirichlet分布に基づいてサンプリング（間引き）することで不均衡を作ります。
         """
-        all_images = []
-        all_labels = []
-        for data in writers_data.values():
-            all_images.extend(data["images"])
-            all_labels.extend(data["labels"])
-
-        if not all_images:
-            return []
-
-        all_images_arr = np.array(all_images)
-        all_labels_arr = np.array(all_labels)
-        num_clients = self.cfg.max_writers
+        # データ数が多い順にライターを選別
+        sorted_writers = sorted(
+            writers_data.items(), key=lambda x: len(x[1]["images"]), reverse=True
+        )
+        selected_writers = sorted_writers[: self.cfg.max_writers]
+        num_clients = len(selected_writers)
         alpha = self.cfg.alpha
         num_classes = self.cfg.num_classes
 
-        client_idcs = [[] for _ in range(num_clients)]
-
-        # クラスごとに各クライアントへの配分比率を決定
+        # クラスごとに、全クライアント（ライター）への配分比率をサンプリング
+        # proportions[k][i] は クラスk を クライアントi にどれだけ割り当てるかの比率
+        proportions = []
         for k in range(num_classes):
-            idx_k = np.where(all_labels_arr == k)[0]
-            if len(idx_k) == 0:
-                continue
-            np.random.shuffle(idx_k)
-            proportions = np.random.dirichlet([alpha] * num_clients)
-            proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
-            idx_split = np.split(idx_k, proportions)
-            for i in range(num_clients):
-                client_idcs[i].extend(idx_split[i])
+            proportions.append(np.random.dirichlet([alpha] * num_clients))
 
         datasets = []
-        for i in range(num_clients):
-            idcs = np.array(client_idcs[i])
-            if len(idcs) < 5:  # 極端にデータが少ないクライアントは除外
+        for i, (w_id, data) in enumerate(selected_writers):
+            images = np.array(data["images"])
+            labels = np.array(data["labels"])
+
+            final_indices = []
+            for k in range(num_classes):
+                idx_k = np.where(labels == k)[0]
+                if len(idx_k) == 0:
+                    continue
+
+                # このライターが持つクラスkのうち、Dirichlet比率に基づいて採用する数を決定
+                # p * num_clients の期待値は1。alphaが小さいと特定のクライアントに集中する。
+                p = proportions[k][i]
+                target_num = int(len(idx_k) * p * num_clients)
+                num_to_keep = min(len(idx_k), target_num)
+
+                # 完全に0にならないよう、比率がある程度あれば最低1つは残す
+                if p > (1.0 / (num_clients * 5)) and num_to_keep == 0:
+                    num_to_keep = 1
+
+                if num_to_keep > 0:
+                    sel = np.random.choice(idx_k, num_to_keep, replace=False)
+                    final_indices.extend(sel)
+
+            if len(final_indices) < 5:
                 continue
-            if len(idcs) > self.cfg.max_imgs_per_writer:
-                idcs = np.random.choice(
-                    idcs, self.cfg.max_imgs_per_writer, replace=False
+
+            # 最大枚数制限
+            if len(final_indices) > self.cfg.max_imgs_per_writer:
+                final_indices = np.random.choice(
+                    final_indices, self.cfg.max_imgs_per_writer, replace=False
                 )
 
             ds = NistWriterDataset(
-                f"client_{i:03d}",
-                all_images_arr[idcs].tolist(),
-                all_labels_arr[idcs].tolist(),
+                w_id,
+                images[final_indices].tolist(),
+                labels[final_indices].tolist(),
                 self.transform,
                 self.cfg.device,
             )
             datasets.append(ds)
-        logger.info(f"Prepared {len(datasets)} synthetic Dirichlet datasets.")
+        logger.info(
+            f"Prepared {len(datasets)} Dirichlet-partitioned datasets (One writer per client)."
+        )
         return datasets
 
 
@@ -749,6 +762,11 @@ def main():
         logger.info(
             f"Stats: Mean={np.mean(all_counts):.1f}, Std={np.std(all_counts):.1f}, Min={np.min(all_counts)}, Max={np.max(all_counts)}"
         )
+        # 上位5名の内訳を表示
+        logger.info("Sample Clients (Writer ID: Total Samples):")
+        for c in clients[:5]:
+            total = len(c.train_dataset) + len(c.test_dataset)
+            logger.info(f"  - {c.writer_id}: {total}")
         logger.info("========================================")
 
     logger.info(
