@@ -139,16 +139,29 @@ def args_parser() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     # federated arguments
     parser.add_argument("--epochs", type=int, default=50, help="rounds of training")
-    parser.add_argument("--num_users", type=int, default=100, help="number of users: K")
+    parser.add_argument("--num-users", type=int, default=100, help="number of users: K")
     parser.add_argument(
         "--frac", type=float, default=0.1, help="the fraction of clients: C"
     )
     parser.add_argument(
-        "--local_ep", type=int, default=5, help="the number of local epochs: E"
+        "--local-ep", type=int, default=5, help="the number of local epochs: E"
     )
-    parser.add_argument("--local_bs", type=int, default=10, help="local batch size: B")
+    parser.add_argument("--local-bs", type=int, default=10, help="local batch size: B")
     parser.add_argument("--bs", type=int, default=128, help="test batch size")
     parser.add_argument("--lr", type=float, default=0.01, help="learning rate")
+    parser.add_argument(
+        "--lr-scheduler",
+        type=str,
+        default="exponential",
+        choices=["constant", "exponential", "step", "cosine"],
+        help="learning rate scheduler type",
+    )
+    parser.add_argument(
+        "--lr-step-size", type=int, default=20, help="step size for step scheduler"
+    )
+    parser.add_argument(
+        "--lr-decay", type=float, default=0.99, help="learning rate decay per round"
+    )
     parser.add_argument(
         "--momentum", type=float, default=0.5, help="SGD momentum (default: 0.5)"
     )
@@ -305,6 +318,7 @@ def main() -> None:
     # 学習履歴
     loss_train: List[float] = []
     acc_test_history: List[float] = []
+    base_lr = args.lr
 
     # クライアントオブジェクトを事前に作成してDataLoaderの生成コストを抑える
     local_updates = [
@@ -315,6 +329,7 @@ def main() -> None:
     # 通信ラウンドのループ
     for iter in range(args.epochs):
         start_time = time.time()
+        current_lr = args.lr
 
         w_locals: List[Dict[str, torch.Tensor]] = []
         loss_locals: List[float] = []
@@ -345,11 +360,20 @@ def main() -> None:
         acc_test, loss_test = test_img(net_glob, dataset_test, args)
         acc_test_history.append(acc_test)
 
+        # 学習率の更新
+        if args.lr_scheduler == "exponential":
+            args.lr = base_lr * (args.lr_decay ** (iter + 1))
+        elif args.lr_scheduler == "step":
+            args.lr = base_lr * (args.lr_decay ** ((iter + 1) // args.lr_step_size))
+        elif args.lr_scheduler == "cosine":
+            args.lr = 0.5 * base_lr * (1 + np.cos(np.pi * (iter + 1) / args.epochs))
+        # constant の場合は args.lr を維持
+
         end_time = time.time()
         round_time = end_time - start_time
 
         print(
-            f"Round {iter:3d}, Average Loss: {loss_avg:.3f}, Test Accuracy: {acc_test:.2f}%, Time: {round_time:.2f}s"
+            f"Round {iter:3d}, LR: {current_lr:.6f}, Average Loss: {loss_avg:.3f}, Test Accuracy: {acc_test:.2f}%, Time: {round_time:.2f}s"
         )
 
     # 結果のプロット
