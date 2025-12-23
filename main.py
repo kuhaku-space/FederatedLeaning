@@ -740,6 +740,17 @@ def main():
     clients = [Client(ds, config) for ds in datasets]
     server = Server(config)
 
+    # 各ユーザーのデータ数分布を出力
+    all_counts = [len(c.train_dataset) + len(c.test_dataset) for c in clients]
+    if all_counts:
+        logger.info("=== Client Data Distribution Summary ===")
+        logger.info(f"Total Clients: {len(clients)}")
+        logger.info(f"Total Samples: {sum(all_counts)}")
+        logger.info(
+            f"Stats: Mean={np.mean(all_counts):.1f}, Std={np.std(all_counts):.1f}, Min={np.min(all_counts)}, Max={np.max(all_counts)}"
+        )
+        logger.info("========================================")
+
     logger.info(
         f"Start Training with {len(clients)} writers. (Centers: {config.num_centers})"
     )
