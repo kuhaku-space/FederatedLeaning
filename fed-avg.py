@@ -180,7 +180,9 @@ class LocalUpdate(object):
     def train(self, net: nn.Module) -> Tuple[Dict[str, torch.Tensor], float]:
         net.train()
         # train and update
-        optimizer = torch.optim.SGD(net.parameters(), lr=self.args.lr, momentum=0.5)
+        optimizer = torch.optim.SGD(
+            net.parameters(), lr=self.args.lr, momentum=self.args.momentum
+        )
 
         epoch_loss: List[float] = []
         for iter in range(self.args.local_ep):
@@ -213,9 +215,7 @@ def FedAvg(w: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     """
     w_avg = copy.deepcopy(w[0])
     for k in w_avg.keys():
-        for i in range(1, len(w)):
-            w_avg[k] += w[i][k]
-        w_avg[k] = torch.div(w_avg[k], len(w))
+        w_avg[k] = torch.stack([w[i][k] for i in range(len(w))], 0).mean(0)
     return w_avg
 
 
@@ -232,8 +232,6 @@ def test_img(
 
     with torch.no_grad():  # 推論時は勾配計算不要
         for idx, (data, target) in enumerate(data_loader):
-            if args.gpu != -1:
-                data, target = data.to(args.device), target.to(args.device)
             log_probs = net_g(data)
             test_loss += F.cross_entropy(log_probs, target, reduction="sum").item()
             y_pred = log_probs.data.max(1, keepdim=True)[1]
@@ -256,6 +254,9 @@ def main() -> None:
         if torch.cuda.is_available() and args.gpu != -1
         else "cpu"
     )
+    if args.device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+
     print(f"Using device: {args.device}")
     if args.device.type == "cuda":
         print(f"GPU Name: {torch.cuda.get_device_name(args.device)}")
@@ -284,10 +285,11 @@ def main() -> None:
         net_glob = MNIST_2NN().to(args.device)
 
     print(net_glob)
-    net_glob.train()
 
     # グローバルモデルの重みをコピー
     w_glob = net_glob.state_dict()
+    # ローカル学習用のモデルを1つ作成して使い回す
+    net_local = copy.deepcopy(net_glob)
 
     # 学習履歴
     loss_train: List[float] = []
@@ -306,9 +308,11 @@ def main() -> None:
         # 選択された各クライアントでローカル学習
         for idx in idxs_users:
             local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
-            w, loss = local.train(net=copy.deepcopy(net_glob).to(args.device))
-            w_locals.append(copy.deepcopy(w))
-            loss_locals.append(copy.deepcopy(loss))
+            net_local.load_state_dict(w_glob)
+            w, loss = local.train(net=net_local)
+            # 重みのコピーを高速化
+            w_locals.append({k: v.clone() for k, v in w.items()})
+            loss_locals.append(loss)
 
         # 重みの集約 (FedAvg)
         w_glob = FedAvg(w_locals)
