@@ -1,7 +1,7 @@
 import argparse
 import copy
 import time
-from typing import Dict, List, Set, Tuple, Union
+from typing import Dict, List, Set, Tuple, Union, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -10,6 +10,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset, TensorDataset
 from torchvision import datasets, transforms
+
+# RTX 3080 (Ampere) 以降で有効な行列演算の高速化
+torch.set_float32_matmul_precision("high")
 
 # ==========================================
 # 1. モデル定義 (論文 Source: 192, 193)
@@ -196,7 +199,7 @@ class LocalUpdate(object):
                     images.to(self.args.device),
                     labels.to(self.args.device),
                 )
-                net.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 log_probs = net(images)
                 loss = self.loss_func(log_probs, labels)
                 loss.backward()
@@ -217,10 +220,9 @@ def FedAvg(w: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     重みの平均化 (Aggregation)
     w: list of client state_dicts
     """
-    w_avg = copy.deepcopy(w[0])
-    for k in w_avg.keys():
-        w_avg[k] = torch.stack([w[i][k] for i in range(len(w))], 0).mean(0)
-    return w_avg
+    return {
+        k: torch.stack([client_w[k] for client_w in w], 0).mean(0) for k in w[0].keys()
+    }
 
 
 def test_img(
@@ -228,7 +230,7 @@ def test_img(
     datatest: Union[datasets.MNIST, TensorDataset],
     args: argparse.Namespace,
 ) -> Tuple[float, float]:
-    """グローバルモデルの評価"""
+    """グローバルモデルの評価 (DataLoaderは外部で作成済みを想定)"""
     net_g.eval()
     test_loss: float = 0
     correct: float = 0
@@ -295,14 +297,23 @@ def main() -> None:
     # ローカル学習用のモデルを1つ作成して使い回す
     net_local = copy.deepcopy(net_glob)
 
+    # モデルのコンパイル (PyTorch 2.0+)
+    # castを使用して型チェッカーのエラーを回避し、学習用・評価用両方を最適化する
+    net_glob = cast(nn.Module, torch.compile(net_glob))
+    net_local = cast(nn.Module, torch.compile(net_local))
+
     # 学習履歴
     loss_train: List[float] = []
     acc_test_history: List[float] = []
 
+    # クライアントオブジェクトを事前に作成してDataLoaderの生成コストを抑える
+    local_updates = [
+        LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[i])
+        for i in range(args.num_users)
+    ]
+
     # 通信ラウンドのループ
     for iter in range(args.epochs):
-        if args.device.type == "cuda":
-            torch.cuda.synchronize(args.device)
         start_time = time.time()
 
         w_locals: List[Dict[str, torch.Tensor]] = []
@@ -314,9 +325,8 @@ def main() -> None:
 
         # 選択された各クライアントでローカル学習
         for idx in idxs_users:
-            local = LocalUpdate(args=args, dataset=dataset_train, idxs=dict_users[idx])
             net_local.load_state_dict(w_glob)
-            w, loss = local.train(net=net_local)
+            w, loss = local_updates[idx].train(net=net_local)
             # 重みのコピーを高速化
             w_locals.append({k: v.clone() for k, v in w.items()})
             loss_locals.append(loss)
@@ -335,8 +345,6 @@ def main() -> None:
         acc_test, loss_test = test_img(net_glob, dataset_test, args)
         acc_test_history.append(acc_test)
 
-        if args.device.type == "cuda":
-            torch.cuda.synchronize(args.device)
         end_time = time.time()
         round_time = end_time - start_time
 
