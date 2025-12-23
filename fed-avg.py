@@ -1,3 +1,4 @@
+import argparse
 import copy
 from typing import Dict, List, Set, Tuple, Union
 
@@ -122,32 +123,43 @@ def mnist_noniid(dataset: datasets.MNIST, num_users: int) -> Dict[int, np.ndarra
 # ==========================================
 
 
-class Args:
-    """ハイパーパラメータ管理"""
+def args_parser() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    # federated arguments
+    parser.add_argument("--epochs", type=int, default=50, help="rounds of training")
+    parser.add_argument("--num_users", type=int, default=100, help="number of users: K")
+    parser.add_argument(
+        "--frac", type=float, default=0.1, help="the fraction of clients: C"
+    )
+    parser.add_argument(
+        "--local_ep", type=int, default=5, help="the number of local epochs: E"
+    )
+    parser.add_argument("--local_bs", type=int, default=10, help="local batch size: B")
+    parser.add_argument("--bs", type=int, default=128, help="test batch size")
+    parser.add_argument("--lr", type=float, default=0.01, help="learning rate")
+    parser.add_argument(
+        "--momentum", type=float, default=0.5, help="SGD momentum (default: 0.5)"
+    )
 
-    def __init__(self) -> None:
-        self.epochs: int = 50
-        self.num_users: int = 100
-        self.frac: float = 0.1
-        self.local_ep: int = 5
-        self.local_bs: int = 10
-        self.bs: int = 128
-        self.lr: float = 0.01
-        self.momentum: float = 0.5
-        self.model: str = "mlp"
-        self.dataset: str = "mnist"
-        self.iid: bool = False
-        self.gpu: int = 0 if torch.cuda.is_available() else -1
-        self.device: torch.device = torch.device(
-            "cuda:{}".format(self.gpu)
-            if torch.cuda.is_available() and self.gpu != -1
-            else "cpu"
-        )
+    # model arguments
+    parser.add_argument("--model", type=str, default="mlp", help="model name")
+    parser.add_argument("--dataset", type=str, default="mnist", help="name of dataset")
+    parser.add_argument("--iid", action="store_true", help="whether i.i.d or not")
+    parser.add_argument(
+        "--gpu",
+        type=int,
+        default=0 if torch.cuda.is_available() else -1,
+        help="GPU ID, -1 for CPU",
+    )
+    return parser.parse_args()
 
 
 class LocalUpdate(object):
     def __init__(
-        self, args: Args, dataset: datasets.MNIST, idxs: Union[Set[int], np.ndarray]
+        self,
+        args: argparse.Namespace,
+        dataset: datasets.MNIST,
+        idxs: Union[Set[int], np.ndarray],
     ) -> None:
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
@@ -199,7 +211,7 @@ def FedAvg(w: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
 
 
 def test_img(
-    net_g: nn.Module, datatest: datasets.MNIST, args: Args
+    net_g: nn.Module, datatest: datasets.MNIST, args: argparse.Namespace
 ) -> Tuple[float, float]:
     """グローバルモデルの評価"""
     net_g.eval()
@@ -227,7 +239,12 @@ def test_img(
 
 
 def main() -> None:
-    args = Args()
+    args = args_parser()
+    args.device = torch.device(
+        "cuda:{}".format(args.gpu)
+        if torch.cuda.is_available() and args.gpu != -1
+        else "cpu"
+    )
 
     # データのロード
     dataset_train, dataset_test = get_mnist()
