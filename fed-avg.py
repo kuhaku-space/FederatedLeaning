@@ -1,5 +1,6 @@
 import argparse
 import copy
+import time
 from typing import Dict, List, Set, Tuple, Union
 
 import matplotlib.pyplot as plt
@@ -67,10 +68,10 @@ def get_mnist() -> Tuple[datasets.MNIST, datasets.MNIST]:
         [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
     )
     dataset_train = datasets.MNIST(
-        "./data/mnist/", train=True, download=True, transform=trans
+        "./data/", train=True, download=True, transform=trans
     )
     dataset_test = datasets.MNIST(
-        "./data/mnist/", train=False, download=True, transform=trans
+        "./data/", train=False, download=True, transform=trans
     )
     return dataset_train, dataset_test
 
@@ -255,6 +256,10 @@ def main() -> None:
         if torch.cuda.is_available() and args.gpu != -1
         else "cpu"
     )
+    print(f"Using device: {args.device}")
+    if args.device.type == "cuda":
+        print(f"GPU Name: {torch.cuda.get_device_name(args.device)}")
+        print(f"CUDA Version: {torch.version.cuda}")
 
     # データのロード
     dataset_train, dataset_test = get_mnist()
@@ -290,6 +295,7 @@ def main() -> None:
 
     # 通信ラウンドのループ
     for iter in range(args.epochs):
+        start_time = time.time()
         w_locals: List[Dict[str, torch.Tensor]] = []
         loss_locals: List[float] = []
 
@@ -318,8 +324,11 @@ def main() -> None:
         acc_test, loss_test = test_img(net_glob, dataset_test, args)
         acc_test_history.append(acc_test)
 
+        end_time = time.time()
+        round_time = end_time - start_time
+
         print(
-            f"Round {iter:3d}, Average Loss: {loss_avg:.3f}, Test Accuracy: {acc_test:.2f}%"
+            f"Round {iter:3d}, Average Loss: {loss_avg:.3f}, Test Accuracy: {acc_test:.2f}%, Time: {round_time:.2f}s"
         )
 
     # 結果のプロット
