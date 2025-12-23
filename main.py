@@ -43,6 +43,8 @@ class Config:
     max_writers: int = 100
     max_imgs_per_writer: int = 100
     data_root: str = "./data/nist/extracted"
+    noniid_type: str = "writer"  # "writer" or "dirichlet"
+    alpha: float = 0.5  # Dirichlet concentration parameter
 
     # 高速化設定
     num_workers: int = 4
@@ -106,6 +108,19 @@ class Config:
         )
         parser.add_argument(
             "--data-root", type=str, default=defaults.data_root, help="Data root path"
+        )
+        parser.add_argument(
+            "--noniid-type",
+            type=str,
+            default=defaults.noniid_type,
+            choices=["writer", "dirichlet"],
+            help="Type of non-IID partitioning (writer: natural, dirichlet: synthetic)",
+        )
+        parser.add_argument(
+            "--alpha",
+            type=float,
+            default=defaults.alpha,
+            help="Dirichlet concentration parameter (smaller alpha = more non-IID)",
         )
         parser.add_argument(
             "--num-workers",
@@ -257,7 +272,10 @@ class NistDataManager:
             self._parse_mit_files_in_dir(target_dir, label, writers_data)
 
         logger.info(f"Found {len(writers_data)} unique writers.")
-        return self._create_datasets(writers_data)
+        if self.cfg.noniid_type == "dirichlet":
+            return self._create_dirichlet_datasets(writers_data)
+        else:
+            return self._create_datasets(writers_data)
 
     def _parse_mit_files_in_dir(self, target_dir: Path, label: int, writers_data: Dict):
         for mit_file in target_dir.rglob("*.mit"):
@@ -340,6 +358,61 @@ class NistDataManager:
 
         logger.info(f"Prepared {len(writers_datasets)} writer datasets.")
         return writers_datasets
+
+    def _create_dirichlet_datasets(self, writers_data: Dict) -> List[NistWriterDataset]:
+        """
+        Dirichlet分布を用いたNon-IID分割。
+        全ライターのデータを一度プールし、クラスごとにDirichlet分布に従って各クライアントへ分配します。
+        """
+        all_images = []
+        all_labels = []
+        for data in writers_data.values():
+            all_images.extend(data["images"])
+            all_labels.extend(data["labels"])
+
+        if not all_images:
+            return []
+
+        all_images_arr = np.array(all_images)
+        all_labels_arr = np.array(all_labels)
+        num_clients = self.cfg.max_writers
+        alpha = self.cfg.alpha
+        num_classes = self.cfg.num_classes
+
+        client_idcs = [[] for _ in range(num_clients)]
+
+        # クラスごとに各クライアントへの配分比率を決定
+        for k in range(num_classes):
+            idx_k = np.where(all_labels_arr == k)[0]
+            if len(idx_k) == 0:
+                continue
+            np.random.shuffle(idx_k)
+            proportions = np.random.dirichlet([alpha] * num_clients)
+            proportions = (np.cumsum(proportions) * len(idx_k)).astype(int)[:-1]
+            idx_split = np.split(idx_k, proportions)
+            for i in range(num_clients):
+                client_idcs[i].extend(idx_split[i])
+
+        datasets = []
+        for i in range(num_clients):
+            idcs = np.array(client_idcs[i])
+            if len(idcs) < 5:  # 極端にデータが少ないクライアントは除外
+                continue
+            if len(idcs) > self.cfg.max_imgs_per_writer:
+                idcs = np.random.choice(
+                    idcs, self.cfg.max_imgs_per_writer, replace=False
+                )
+
+            ds = NistWriterDataset(
+                f"client_{i:03d}",
+                all_images_arr[idcs].tolist(),
+                all_labels_arr[idcs].tolist(),
+                self.transform,
+                self.cfg.device,
+            )
+            datasets.append(ds)
+        logger.info(f"Prepared {len(datasets)} synthetic Dirichlet datasets.")
+        return datasets
 
 
 # --- モデル定義 ---
@@ -635,6 +708,10 @@ class ExperimentLogger:
 def main():
     config = Config.from_args()
     logger.info(f"Using device: {config.device}")
+    logger.info(
+        f"Partitioning: {config.noniid_type} "
+        f"(alpha={config.alpha if config.noniid_type == 'dirichlet' else 'N/A'})"
+    )
 
     # 再現性のためのシード固定
     torch.manual_seed(config.seed)
