@@ -277,6 +277,8 @@ def main() -> None:
         torch.backends.cudnn.benchmark = True
 
     print(f"Using device: {args.device}")
+    print(f"Dataset: {args.dataset}")
+    print(f"IID: {args.iid}")
     if args.device.type == "cuda":
         print(f"GPU Name: {torch.cuda.get_device_name(args.device)}")
         print(f"CUDA Version: {torch.version.cuda}")
