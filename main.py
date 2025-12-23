@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -36,6 +36,8 @@ class Config:
     local_epochs: int = 5
     batch_size: int = 32
     lr: float = 0.05
+    frac: float = 0.1  # クライアントのサンプリング割合
+    seed: int = 42  # 再現性のためのシード
 
     # データ設定
     max_writers: int = 100
@@ -80,6 +82,18 @@ class Config:
         )
         parser.add_argument(
             "--lr", type=float, default=defaults.lr, help="Learning rate"
+        )
+        parser.add_argument(
+            "--frac",
+            type=float,
+            default=defaults.frac,
+            help="Fraction of clients to sample per round",
+        )
+        parser.add_argument(
+            "--seed",
+            type=int,
+            default=defaults.seed,
+            help="Random seed for reproducibility",
         )
         parser.add_argument(
             "--max-writers", type=int, default=defaults.max_writers, help="Max writers"
@@ -281,7 +295,7 @@ class NistDataManager:
                         writers_data[writer_id]["images"].append(str(target_path))
                         writers_data[writer_id]["labels"].append(label)
 
-            except Exception as e:
+            except Exception:
                 # ファイル破損等はスキップ
                 pass
 
@@ -497,14 +511,13 @@ class Server:
             if not updates_for_model:
                 continue
 
-            avg_weights = copy.deepcopy(updates_for_model[0])
-            for key in avg_weights.keys():
-                for j in range(1, len(updates_for_model)):
-                    avg_weights[key] += updates_for_model[j][key]
-                # 平均計算: float除算
-                avg_weights[key] = torch.div(avg_weights[key], len(updates_for_model))
-
-            model.load_state_dict(avg_weights)
+            # FedAvg: torch.stack を使用して効率的に平均化
+            keys = updates_for_model[0].keys()
+            fed_avg_weights = {
+                k: torch.stack([upd[k] for upd in updates_for_model], 0).mean(0)
+                for k in keys
+            }
+            model.load_state_dict(fed_avg_weights)
 
     def evaluate(self, clients: List[Client]) -> Tuple[float, float]:
         total_correct = 0
@@ -623,6 +636,12 @@ def main():
     config = Config.from_args()
     logger.info(f"Using device: {config.device}")
 
+    # 再現性のためのシード固定
+    torch.manual_seed(config.seed)
+    np.random.seed(config.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(config.seed)
+
     if "cuda" in config.device:
         # GPUの場合: デバイス名を表示
         gpu_name = torch.cuda.get_device_name(0)
@@ -649,19 +668,28 @@ def main():
     )
 
     # 4. 学習ループ
+    num_sampled_clients = max(int(config.frac * len(clients)), 1)
+
     for r in range(config.rounds):
         start_time = time.time()
 
         round_updates = []
         round_losses = []
-
-        # 今ラウンドのクライアント所属記録用辞書
         current_allocations = {"Round": r + 1}
 
-        # クライアント学習
-        for client in tqdm(
-            clients, desc=f"Round {r + 1}/{config.rounds}", leave=False, ncols=80
+        # クライアントのランダムサンプリング
+        sampled_indices = np.random.choice(
+            range(len(clients)), num_sampled_clients, replace=False
+        )
+
+        # 選択されたクライアントで学習
+        for idx in tqdm(
+            sampled_indices,
+            desc=f"Round {r + 1}/{config.rounds}",
+            leave=False,
+            ncols=80,
         ):
+            client = clients[idx]
             center_idx, weights, loss = client.participate(server.models)
 
             round_updates.append((center_idx, weights, loss))
