@@ -173,8 +173,12 @@ class LocalUpdate(object):
         self.args = args
         self.loss_func = nn.CrossEntropyLoss()
         # Subsetはindicesとしてsequenceを受け取るためlist化
+        # データセットが既にGPUにある場合、num_workers=0 (デフォルト) が最も高速です
         self.ldr_train: DataLoader = DataLoader(
-            Subset(dataset, list(idxs)), batch_size=self.args.local_bs, shuffle=True
+            Subset(dataset, list(idxs)),
+            batch_size=self.args.local_bs,
+            shuffle=True,
+            num_workers=0,
         )
 
     def train(self, net: nn.Module) -> Tuple[Dict[str, torch.Tensor], float]:
@@ -297,7 +301,10 @@ def main() -> None:
 
     # 通信ラウンドのループ
     for iter in range(args.epochs):
+        if args.device.type == "cuda":
+            torch.cuda.synchronize(args.device)
         start_time = time.time()
+
         w_locals: List[Dict[str, torch.Tensor]] = []
         loss_locals: List[float] = []
 
@@ -328,6 +335,8 @@ def main() -> None:
         acc_test, loss_test = test_img(net_glob, dataset_test, args)
         acc_test_history.append(acc_test)
 
+        if args.device.type == "cuda":
+            torch.cuda.synchronize(args.device)
         end_time = time.time()
         round_time = end_time - start_time
 
