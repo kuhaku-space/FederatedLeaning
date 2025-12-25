@@ -539,33 +539,27 @@ class Client:
     def _select_best_model(
         self, global_models: List[nn.Module]
     ) -> Tuple[int, nn.Module]:
+        # 学習データの最初のバッチを使って判断する
+        try:
+            x_check, y_check = next(iter(self.train_loader))
+        except StopIteration:
+            return 0, copy.deepcopy(global_models[0])
+
+        x_check, y_check = x_check.to(self.device), y_check.to(self.device)
+
         best_idx = 0
         best_loss = float("inf")
 
-        # 全データローダーを使って評価 (計算時間は増えます)
-        for i, model in enumerate(global_models):
-            total_loss = 0.0
-            count = 0
+        with torch.no_grad():
+            for i, model in enumerate(global_models):
+                model.eval()
+                output = model(x_check)
+                loss = self.criterion(output, y_check).item()
+                if loss < best_loss:
+                    best_loss = loss
+                    best_idx = i
 
-            # 推論モード
-            model.eval()
-            with torch.no_grad():
-                for images, labels in self.train_loader:  # 全バッチを回す
-                    images, labels = (
-                        images.to(self.cfg.device),
-                        labels.to(self.cfg.device),
-                    )
-                    outputs = model(images)
-                    loss = self.criterion(outputs, labels)
-                    total_loss += loss.item() * images.size(0)
-                    count += images.size(0)
-
-            avg_loss = total_loss / count
-
-            if avg_loss < best_loss:
-                best_loss = avg_loss
-                best_idx = i
-
+        # Deepcopyして返す
         return best_idx, copy.deepcopy(global_models[best_idx])
 
 
