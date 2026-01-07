@@ -2,11 +2,12 @@ import argparse
 import copy
 import json
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional, override
 
 import numpy as np
 import pandas as pd
@@ -45,6 +46,11 @@ class Config:
     data_root: str = "./data/nist/extracted"
     noniid_type: str = "writer"  # "writer" or "dirichlet"
     alpha: float = 0.5  # Dirichlet concentration parameter
+
+    # EM algorithm設定 (Multi-Center FL paper)
+    em_temperature: float = (
+        1.0  # Temperature for soft assignment (lower = harder assignment)
+    )
 
     # 高速化設定
     num_workers: int = 4
@@ -168,12 +174,12 @@ class Config:
 
 
 # --- Dataset 定義 ---
-class NistWriterDataset(Dataset):
+class NistWriterDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     def __init__(
         self,
         writer_id: str,
-        images: List[str],
-        labels: List[int],
+        images: list[str],
+        labels: list[int],
         transform: Optional[transforms.Compose] = None,
         device: str = "cpu",
     ):
@@ -217,7 +223,8 @@ class NistWriterDataset(Dataset):
         return len(self.data)
 
     # 修正箇所: 戻り値の型ヒントを Tensor, Tensor に変更
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    @override
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
         return self.data[index], self.targets[index]
 
 
@@ -233,7 +240,7 @@ class NistDataManager:
             ]
         )
 
-    def _generate_hex_label_map(self) -> Dict[str, int]:
+    def _generate_hex_label_map(self) -> dict[str, int]:
         mapping = {}
         # 0-9
         for i in range(10):
@@ -246,7 +253,7 @@ class NistDataManager:
             mapping[f"{0x61 + i:02x}"] = 36 + i
         return mapping
 
-    def prepare_data(self) -> List[NistWriterDataset]:
+    def prepare_data(self) -> list[NistWriterDataset]:
         data_root = Path(self.cfg.data_root)
         class_dir = data_root / "by_class"
 
@@ -255,7 +262,7 @@ class NistDataManager:
             logger.error(f"Directory not found: {class_dir}")
             return []
 
-        writers_data: Dict[str, Dict[str, List[Any]]] = {}
+        writers_data: dict[str, dict[str, list[Any]]] = {}
         hex_to_label = self._generate_hex_label_map()
 
         # .mit ファイルの解析
@@ -277,7 +284,12 @@ class NistDataManager:
         else:
             return self._create_datasets(writers_data)
 
-    def _parse_mit_files_in_dir(self, target_dir: Path, label: int, writers_data: Dict):
+    def _parse_mit_files_in_dir(
+        self,
+        target_dir: Path,
+        label: int,
+        writers_data: dict[str, dict[str, list[Any]]],
+    ):
         for mit_file in target_dir.rglob("*.mit"):
             mit_stem = mit_file.stem
             try:
@@ -325,7 +337,9 @@ class NistDataManager:
                 return comp
         return None
 
-    def _create_datasets(self, writers_data: Dict) -> List[NistWriterDataset]:
+    def _create_datasets(
+        self, writers_data: dict[str, dict[str, list[Any]]]
+    ) -> list[NistWriterDataset]:
         writers_datasets = []
 
         # データ数が多い順にソート
@@ -359,7 +373,9 @@ class NistDataManager:
         logger.info(f"Prepared {len(writers_datasets)} writer datasets.")
         return writers_datasets
 
-    def _create_dirichlet_datasets(self, writers_data: Dict) -> List[NistWriterDataset]:
+    def _create_dirichlet_datasets(
+        self, writers_data: dict[str, dict[str, list[Any]]]
+    ) -> list[NistWriterDataset]:
         """
         Dirichlet分布を用いたNon-IID分割。
         各クライアントには特定の1人のライターのデータのみを割り当て、
@@ -505,14 +521,15 @@ class Client:
             self.test_loader = None
 
     def participate(
-        self, global_models: List[nn.Module]
-    ) -> Tuple[int, Dict[str, torch.Tensor], float]:
+        self, global_models: list[nn.Module]
+    ) -> tuple[list[float], dict[str, torch.Tensor], float]:
         """
-        1. 複数のGlobal Modelの中からLossが最も低いモデルを選択
-        2. 選択したモデルをローカルデータで追加学習
-        3. 重み差分（あるいは更新後の重み）とLossを返す
+        E-step: ソフト割り当て確率を計算し、最良モデルで学習
+
+        Returns:
+            tuple: (確率リスト, 更新後の重み, 平均損失)
         """
-        best_idx, model = self._select_best_model(global_models)
+        probs, _best_idx, model = self._compute_center_probabilities(global_models)
 
         # 学習
         model.train()
@@ -534,33 +551,49 @@ class Client:
                 batch_count += 1
 
         avg_loss = epoch_loss / batch_count if batch_count > 0 else 0.0
-        return best_idx, model.state_dict(), avg_loss
+        return probs, model.state_dict(), avg_loss
 
-    def _select_best_model(
-        self, global_models: List[nn.Module]
-    ) -> Tuple[int, nn.Module]:
+    def _compute_center_probabilities(
+        self, global_models: list[nn.Module]
+    ) -> tuple[list[float], int, nn.Module]:
+        """
+        E-step: 全センターに対するソフト割り当て確率を計算
+
+        論文のアルゴリズムに基づき、softmax(-loss/τ) で確率を計算
+        """
         # 学習データの最初のバッチを使って判断する
         try:
             x_check, y_check = next(iter(self.train_loader))
         except StopIteration:
-            return 0, copy.deepcopy(global_models[0])
+            # データがない場合は均等確率
+            num_centers = len(global_models)
+            uniform_probs = [1.0 / num_centers] * num_centers
+            return uniform_probs, 0, copy.deepcopy(global_models[0])
 
         x_check, y_check = x_check.to(self.device), y_check.to(self.device)
 
-        best_idx = 0
-        best_loss = float("inf")
-
+        # 各センターの損失を計算
+        losses: list[float] = []
         with torch.no_grad():
-            for i, model in enumerate(global_models):
+            for model in global_models:
                 model.eval()
                 output = model(x_check)
                 loss = self.criterion(output, y_check).item()
-                if loss < best_loss:
-                    best_loss = loss
-                    best_idx = i
+                losses.append(loss)
 
-        # Deepcopyして返す
-        return best_idx, copy.deepcopy(global_models[best_idx])
+        # Softmax on negative losses (lower loss = higher probability)
+        # p_k = exp(-loss_k / τ) / Σ_j exp(-loss_j / τ)
+        temperature = self.cfg.em_temperature
+        neg_losses = [-loss_val / temperature for loss_val in losses]
+        max_nl = max(neg_losses)  # for numerical stability
+        exp_vals = [math.exp(nl - max_nl) for nl in neg_losses]
+        total = sum(exp_vals)
+        probs = [ev / total for ev in exp_vals]
+
+        # 最良のセンターを選択（学習には最も確率が高いモデルを使用）
+        best_idx = probs.index(max(probs))
+
+        return probs, best_idx, copy.deepcopy(global_models[best_idx])
 
 
 # --- Server 定義 ---
@@ -574,32 +607,40 @@ class Server:
         ]
         self.criterion = nn.CrossEntropyLoss()
 
-    def aggregate(self, updates: List[Tuple[int, Dict[str, torch.Tensor], float]]):
+    def aggregate(
+        self, updates: list[tuple[list[float], dict[str, torch.Tensor], float]]
+    ):
+        """
+        M-step: 確率に基づく重み付き集約
+
+        各クライアントの寄与は、そのクライアントのセンターへの割り当て確率で重み付けされる
+        """
         if not updates:
             return
 
-        # センターごとのアップデートリストを作成
-        center_updates: Dict[int, List[Dict[str, torch.Tensor]]] = {
-            i: [] for i in range(len(self.models))
-        }
-        for idx, weights, _ in updates:
-            center_updates[idx].append(weights)
+        # 各センターに対して重み付き集約を実行
+        for center_idx, model in enumerate(self.models):
+            weighted_params: dict[str, torch.Tensor] = {}
+            total_weight = 0.0
 
-        # FedAvg
-        for i, model in enumerate(self.models):
-            updates_for_model = center_updates[i]
-            if not updates_for_model:
-                continue
+            for probs, weights, _ in updates:
+                weight = probs[center_idx]  # このクライアントのこのセンターへの確率
+                if weight > 1e-6:  # 無視できる寄与をスキップ
+                    total_weight += weight
+                    for key, param in weights.items():
+                        if key not in weighted_params:
+                            weighted_params[key] = weight * param.clone()
+                        else:
+                            weighted_params[key] += weight * param
 
-            # FedAvg: torch.stack を使用して効率的に平均化
-            keys = updates_for_model[0].keys()
-            fed_avg_weights = {
-                k: torch.stack([upd[k] for upd in updates_for_model], 0).mean(0)
-                for k in keys
-            }
-            model.load_state_dict(fed_avg_weights)
+            if total_weight > 0:
+                # 重み付き平均
+                fed_avg_weights = {
+                    k: v / total_weight for k, v in weighted_params.items()
+                }
+                model.load_state_dict(fed_avg_weights)
 
-    def evaluate(self, clients: List[Client]) -> Tuple[float, float]:
+    def evaluate(self, clients: list[Client]) -> tuple[float, float]:
         total_correct = 0
         total_samples = 0
         total_loss = 0.0
@@ -672,7 +713,7 @@ class ExperimentLogger:
         train_loss: float,
         val_loss: float,
         accuracy: float,
-        center_counts: Dict[int, int],
+        center_counts: dict[int, int],
         elapsed_time: float,
     ):
         record = {
@@ -691,7 +732,7 @@ class ExperimentLogger:
         else:
             df.to_csv(self.log_csv, mode="a", header=False, index=False)
 
-    def save_allocations(self, allocations: List[Dict]):
+    def save_allocations(self, allocations: list[dict[str, int]]):
         """
         allocations: [{"Round": 1, "writerA": 0, ...}]
         """
@@ -790,23 +831,26 @@ def main():
             ncols=80,
         ):
             client = clients[idx]
-            center_idx, weights, loss = client.participate(server.models)
+            probs, weights, loss = client.participate(server.models)
 
-            round_updates.append((center_idx, weights, loss))
+            round_updates.append((probs, weights, loss))
             round_losses.append(loss)
-            current_allocations[client.writer_id] = center_idx
+            # 最大確率のセンターを割り当てとして記録
+            best_center = probs.index(max(probs))
+            current_allocations[client.writer_id] = best_center
 
         # 集約
         server.aggregate(round_updates)
 
         # 評価
         acc, val_loss = server.evaluate(clients)
-        avg_train_loss = np.mean(round_losses) if round_losses else 0.0
+        avg_train_loss = float(np.mean(round_losses)) if round_losses else 0.0
 
-        # クラスタ所属数集計
+        # クラスタ所属数集計（最大確率のセンターでカウント）
         center_counts = {i: 0 for i in range(config.num_centers)}
-        for idx, _, _ in round_updates:
-            center_counts[idx] += 1
+        for probs, _, _ in round_updates:
+            best_center = probs.index(max(probs))
+            center_counts[best_center] += 1
 
         end_time = time.time()
         elapsed_time = end_time - start_time
